@@ -1,0 +1,40 @@
+# Compiled binaries and shared libraries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+out/
+checkpoint.lsn
+# Test binaries and coverage reports
+*.test
+*.out
+*.coverprofile
+profile.cov
+coverage.*
+
+# Dependencies
+vendor/
+
+# Go workspaces
+go.work
+go.work.sum
+
+# Secrets and environment variables
+.env
+.env.*
+!.env.example
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp

@@ -1,0 +1,10 @@
+server:
+  port: "8080"
+
+router:
+  mode: "http"
+  algorithm: "round_robin"
+  urls:
+    - "http://127.0.0.1:8000"
+    - "http://127.0.0.2:8001"
+    - "http://127.0.0.3:8002"
