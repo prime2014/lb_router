@@ -107,7 +107,7 @@ func initLogger() {
 	multiWriter := io.MultiWriter(consoleWriter, fileWriter)
 
 	zerolog.SetGlobalLevel(zerolog.DebugLevel)
-	zerolog.New(multiWriter).With().Timestamp().Caller().Logger()
+	log.Logger = zerolog.New(multiWriter).With().Timestamp().Caller().Logger()
 }
 
 func main() {

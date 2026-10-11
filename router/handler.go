@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
-	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 type RoutingType int
@@ -99,12 +101,15 @@ func (c *ConsistentHashRing) GetNode(key string) (string, bool) {
 }
 
 type RouterHandler struct {
-	counter   uint64
-	algorithm RoutingType
-	ctx       context.Context
-	urls      []string
-	mode      ConnectionType
-	ring      *ConsistentHashRing
+	mu          sync.RWMutex
+	counter     uint64
+	algorithm   RoutingType
+	ctx         context.Context
+	urls        []string
+	mode        ConnectionType
+	ring        *ConsistentHashRing
+	connection  map[string]*atomic.Uint64
+	rateLimiter *RateLimiter
 }
 
 func NewRouterHandler(cfg RouterConfig, ctx context.Context) *RouterHandler {
@@ -112,10 +117,12 @@ func NewRouterHandler(cfg RouterConfig, ctx context.Context) *RouterHandler {
 	mode := ParseConnectionType(cfg.Mode)
 
 	handler := &RouterHandler{
-		urls:      cfg.URLs,
-		algorithm: algorithm,
-		ctx:       ctx,
-		mode:      mode,
+		urls:        cfg.URLs,
+		algorithm:   algorithm,
+		ctx:         ctx,
+		mode:        mode,
+		connection:  make(map[string]*atomic.Uint64),
+		rateLimiter: NewRateLimiter(time.Minute, 1000),
 	}
 
 	// Initialize ring if consistent hashing is selected
@@ -136,6 +143,8 @@ func (r *RouterHandler) SelectServer(ctx context.Context) string {
 		return r.selectRoundRobin()
 	case ConsistentHash:
 		return r.selectConsistentHash(ctx)
+	case LeastConnection:
+		return r.selectLeastConnection(ctx)
 	case IPHash:
 		return r.selectIPHash(ctx)
 	default:
@@ -150,6 +159,26 @@ func (r *RouterHandler) selectRoundRobin() string {
 	return r.urls[myCounter%n]
 }
 
+func (r *RouterHandler) selectLeastConnection(ctx context.Context) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if len(r.connection) == 0 {
+		return ""
+	}
+
+	var minServer string
+	var minCount uint64 = math.MaxUint64
+
+	for server, count := range r.connection {
+		if count.Load() < minCount {
+			minCount = count.Load()
+			minServer = server
+		}
+	}
+
+	return minServer
+}
 func (r *RouterHandler) selectConsistentHash(ctx context.Context) string {
 	// Attempt to pull client IP
 	key, ok := ctx.Value("client_ip").(string)
@@ -207,7 +236,7 @@ func (r *RouterHandler) StartTCPServer(url string) error {
 		if err != nil {
 			select {
 			case <-r.ctx.Done():
-				log.Println("Server shutting down, waiting for active connections...")
+				log.Info().Msg("[Xpress]: Server shutting down, waiting for active connections...")
 				wg.Wait()
 				return nil
 			default:
@@ -235,11 +264,18 @@ func (r *RouterHandler) StartHTTPServer(listenAddr string, certFile, keyFile str
 
 	mux.HandleFunc("/", r.serveHTTPProxy)
 
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	})
+
 	server := &http.Server{
 		Addr:              listenAddr,
 		Handler:           mux,
 		IdleTimeout:       5 * time.Minute,
-		ReadHeaderTimeout: time.Minute,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
 	}
 
 	// Graceful shutdown listener
@@ -268,26 +304,59 @@ func (r *RouterHandler) StartHTTPServer(listenAddr string, certFile, keyFile str
 
 func (r *RouterHandler) serveHTTPProxy(w http.ResponseWriter, req *http.Request) {
 	// extract client IP (handling upstream X-Forwarded-For if behind another edge proxy)
-	clientIP, _, _ := net.SplitHostPort(req.RemoteAddr)
+	clientIP, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		clientIP = req.RemoteAddr
+	}
+
+	// check rate limiter using the persistent instance
+	if !r.rateLimiter.SlidingWindow(clientIP) {
+		http.Error(w, "Too many requests", http.StatusTooManyRequests)
+	}
+
 	reqCtx := context.WithValue(req.Context(), "client_ip", clientIP)
 
 	targetServer := r.SelectServer(reqCtx)
 	targetURL, err := url.Parse(targetServer)
+
+	if r.algorithm == LeastConnection {
+		r.connection[targetServer].Add(1)
+		defer func() { r.connection[targetServer].Add(^uint64(0)) }()
+	}
 
 	if err != nil {
 		http.Error(w, "Bad Gateway Target", http.StatusBadGateway)
 		return
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy := httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetXForwarded()
+			pr.SetURL(targetURL)
 
-	proxy.Rewrite = func(pr *httputil.ProxyRequest) {
-		// Set the target scheme/host (equivalent to the default Driector behaviour)
-		pr.SetXForwarded()
+			if pr.Out.Header.Get("User-Agent") == "" {
+				pr.Out.Header.Set("User-Agent", "Xpress-LoadBalancer/1.0")
+			}
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			statusCode := resp.StatusCode
 
-		pr.SetURL(targetURL)
+			event := log.Info()
 
-		pr.Out.Host = pr.In.Host
+			if statusCode >= 400 {
+				event = log.Error()
+			}
+
+			event.
+				Int("Status", statusCode).
+				Str("Method", req.Method).
+				Str("Protocol", req.Proto).
+				Str("RemoteAddr", targetServer).
+				Str("URL", req.URL.Path).
+				Msg("[Xpress]")
+
+			return nil
+		},
 	}
 
 	proxy.ServeHTTP(w, req)

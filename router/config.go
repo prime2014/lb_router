@@ -8,16 +8,26 @@ import (
 type Config struct {
 	Server ServerConfig `mapstructure:"server"`
 	Router RouterConfig `mapstructure:"router"`
+	Logs   LogConfig    `mapstructure:"logs"`
 }
 
 type ServerConfig struct {
-	Port string `mapstructure:"port"`
+	Port       string `mapstructure:"port"`
+	Listener   string `mapstructure:"listener"`
+	ServerName string `mapstructure:"server_name"`
+	CertFile   string `mapstructure:"certFile"`
+	CertKey    string `mapstructure:"certKey"`
 }
 
 type RouterConfig struct {
 	Mode      string   `mapstructure:"mode"`
 	Algorithm string   `mapstructure:"algorithm"`
 	URLs      []string `mapstructure:"urls"`
+}
+
+type LogConfig struct {
+	Path  string `mapstructure:"path"`
+	Level string `mapstructure:"level"`
 }
 
 // Map string algorithm names to RoutingType enum

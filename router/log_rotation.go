@@ -35,10 +35,12 @@ func NewRotatingFileWriter(logPath, symlinkPath string, maxSizeMB, maxBackups, m
 
 func (w *RotatingFileWriter) Write(p []byte) (n int, err error) {
 	w.mu.Lock()
-	defer w.mu.Lock()
+	defer w.mu.Unlock()
 
 	n, err = w.Logger.Write(p)
-	w.updateSymlink()
+	if err == nil {
+		w.updateSymlink()
+	}
 	return n, err
 }
 
@@ -48,19 +50,34 @@ func (w *RotatingFileWriter) updateSymlink() {
 	}
 
 	target := w.Logger.Filename
-
-	if current, err := os.Readlink(w.symlinkPath); err == nil && current == target {
-		return
-	}
-
-	_ = os.Remove(w.symlinkPath)
-
-	// Create absolute paths for safety
 	absTarget, err := filepath.Abs(target)
 	if err != nil {
 		absTarget = target
 	}
 
-	_ = os.Symlink(absTarget, w.symlinkPath)
+	// Single check: Read the existing symlink target
+	if current, err := os.Readlink(w.symlinkPath); err == nil {
+		// Resolve relative to the symlink's parent folder, not working directory
+		symlinkDir := filepath.Dir(w.symlinkPath)
+		absCurrent := current
+		if !filepath.IsAbs(current) {
+			absCurrent = filepath.Join(symlinkDir, current)
+		}
 
+		if filepath.Clean(absCurrent) == filepath.Clean(absTarget) {
+			return // Symlink already points to the correct file
+		}
+	}
+
+	// Update symlink atomically via temp file + rename to avoid race conditions
+	tmpSymlink := w.symlinkPath + ".tmp"
+	_ = os.Remove(tmpSymlink)
+
+	if err := os.Symlink(absTarget, tmpSymlink); err == nil {
+		_ = os.Rename(tmpSymlink, w.symlinkPath)
+	} else {
+		// Fallback for direct link if rename fails or on systems where temp symlinks fail
+		_ = os.Remove(w.symlinkPath)
+		_ = os.Symlink(absTarget, w.symlinkPath)
+	}
 }
