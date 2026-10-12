@@ -13,12 +13,14 @@ checkpoint.lsn
 *.coverprofile
 profile.cov
 coverage.*
+docs/**
+
+dist/
 
 # Dependencies
 vendor/
 
 # Go workspaces
-go.work
 go.work.sum
 
 # Secrets and environment variables

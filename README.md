@@ -1,3 +1,10 @@
+<p align="center">
+  <img src="assets/xpress-banner.svg" alt="Xpress: a Go load balancer and reverse proxy" width="100%">
+</p>
+<p align="center">
+  <img src="https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white" alt="Go 1.27">
+  <img src="https://img.shields.io/badge/status-early--stage-orange" alt="Status: early-stage">
+</p>
 # Xpress
 
 **Xpress** is a load balancer and reverse proxy written in Go. It sits in front of a set of backend servers, accepts client traffic, and forwards each request to a backend chosen by a configurable routing algorithm.

@@ -1,9 +1,11 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -312,54 +314,127 @@ func (r *RouterHandler) serveHTTPProxy(w http.ResponseWriter, req *http.Request)
 	// check rate limiter using the persistent instance
 	if !r.rateLimiter.SlidingWindow(clientIP) {
 		http.Error(w, "Too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	// buffer request body if present so it can be re-read on retries
+	if req.Body != nil && req.GetBody == nil {
+		bodyBytes, err := io.ReadAll(req.Body)
+		if err == nil {
+			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			req.GetBody = func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+			}
+		}
 	}
 
 	reqCtx := context.WithValue(req.Context(), "client_ip", clientIP)
 
-	targetServer := r.SelectServer(reqCtx)
-	targetURL, err := url.Parse(targetServer)
-
-	if r.algorithm == LeastConnection {
-		r.connection[targetServer].Add(1)
-		defer func() { r.connection[targetServer].Add(^uint64(0)) }()
+	maxRetries := 3
+	if maxRetries > len(r.urls) {
+		maxRetries = len(r.urls)
 	}
 
-	if err != nil {
-		http.Error(w, "Bad Gateway Target", http.StatusBadGateway)
-		return
-	}
+	var lastErr error
+	// var statusCode int
 
-	proxy := httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetXForwarded()
-			pr.SetURL(targetURL)
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		targetServer := r.SelectServer(reqCtx)
+		targetURL, parseError := url.Parse(targetServer)
 
-			if pr.Out.Header.Get("User-Agent") == "" {
-				pr.Out.Header.Set("User-Agent", "Xpress-LoadBalancer/1.0")
-			}
-		},
-		ModifyResponse: func(resp *http.Response) error {
-			statusCode := resp.StatusCode
+		if parseError != nil {
+			http.Error(w, "Bad Gateway Target", http.StatusBadGateway)
+			return
+		}
 
+		failed := false
+
+		proxy := &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetXForwarded()
+				pr.SetURL(targetURL)
+
+				if pr.Out.Header.Get("User-Agent") == "" {
+					pr.Out.Header.Set("User-Agent", "Xpress-LoadBalancer/1.0")
+				}
+			},
+
+			ErrorHandler: func(rw http.ResponseWriter, r *http.Request, err error) {
+				lastErr = err
+				failed = true
+				log.Error().
+					Err(err).
+					Str("Target", targetServer).
+					Int("Attempt", attempt+1).
+					Msg("[Xpress] Connection error, retrying...")
+			},
+			ModifyResponse: func(resp *http.Response) error {
+				statusCode := resp.StatusCode
+
+				if statusCode >= 500 {
+					failed = true
+					lastErr = fmt.Errorf("backend returned status %d", statusCode)
+					log.Error().
+						Int("Status", statusCode).
+						Str("Target", targetServer).
+						Int("Attempt", attempt+1).
+						Msg("[Xpress] Server error, retrying...")
+				}
+				return nil
+			},
+		}
+
+		recorder := &proxyResponseRecorder{
+			ResponseWriter: w,
+			statusCode:     http.StatusOK,
+		}
+
+		proxy.ServeHTTP(recorder, req)
+
+		if !failed {
+			// Log successful or client-error response
 			event := log.Info()
-
-			if statusCode >= 400 {
+			if recorder.statusCode >= 400 {
 				event = log.Error()
 			}
-
 			event.
-				Int("Status", statusCode).
+				Int("Status", recorder.statusCode).
 				Str("Method", req.Method).
-				Str("Protocol", req.Proto).
 				Str("RemoteAddr", targetServer).
 				Str("URL", req.URL.Path).
 				Msg("[Xpress]")
+			return
+		}
 
-			return nil
-		},
+		if req.GetBody != nil {
+			body, err := req.GetBody()
+			if err == nil {
+				req.Body = body
+			}
+		}
 	}
 
-	proxy.ServeHTTP(w, req)
+	log.Error().Err(lastErr).Str("URL", req.URL.Path).Msg("[Xpress] All retry attempts failed")
+	http.Error(w, "Bad Gateway - All backends failed", http.StatusBadGateway)
+
+}
+
+type proxyResponseRecorder struct {
+	http.ResponseWriter
+	statusCode    int
+	headerWritten bool
+}
+
+func (rec *proxyResponseRecorder) WriteHeader(code int) {
+	rec.statusCode = code
+	rec.headerWritten = true
+}
+
+func (rec *proxyResponseRecorder) Write(b []byte) (int, error) {
+	if !rec.headerWritten {
+		rec.WriteHeader(http.StatusOK)
+	}
+	return rec.ResponseWriter.Write(b)
 }
 
 func (r *RouterHandler) StartServer(listenAddr string, certFile, keyFile string) error {
