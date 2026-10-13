@@ -12,17 +12,52 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port       string `mapstructure:"port"`
-	Listener   string `mapstructure:"listener"`
+	HTTPPort   string `mapstructure:"http_port"`
+	HTTPSPort  string `mapstructure:"https_port"`
 	ServerName string `mapstructure:"server_name"`
 	CertFile   string `mapstructure:"certFile"`
 	CertKey    string `mapstructure:"certKey"`
 }
 
 type RouterConfig struct {
-	Mode      string   `mapstructure:"mode"`
-	Algorithm string   `mapstructure:"algorithm"`
-	URLs      []string `mapstructure:"urls"`
+	Mode          string   `mapstructure:"mode"`
+	ProxyProtocol bool     `mapstructure:"proxy_protocol"`
+	Algorithm     string   `mapstructure:"algorithm"`
+	URLs          []string `mapstructure:"urls"`
+}
+
+func (c *Config) Normalize() {
+	if c.Server.HTTPPort == "" {
+		c.Server.HTTPPort = "80"
+	}
+	if c.Server.HTTPSPort == "" {
+		c.Server.HTTPSPort = "443"
+	}
+	if c.Router.Mode == "" {
+		c.Router.Mode = "http"
+	}
+	if c.Router.Algorithm == "" {
+		c.Router.Algorithm = "round_robin"
+	}
+
+}
+
+func DefaulConfig() Config {
+	return Config{
+		Server: ServerConfig{
+			HTTPPort:  "80",
+			HTTPSPort: "443",
+		},
+		Router: RouterConfig{
+			Mode:          "http",
+			Algorithm:     "round_robin",
+			ProxyProtocol: false,
+		},
+		Logs: LogConfig{
+			Path:  "./logs",
+			Level: "debug",
+		},
+	}
 }
 
 type LogConfig struct {

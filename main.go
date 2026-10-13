@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"router"
@@ -18,6 +19,7 @@ import (
 var (
 	configFile string
 	port       string
+	listenAddr string
 
 	rootCmd = &cobra.Command{
 		Use:   "xpress",
@@ -43,10 +45,23 @@ var (
 				Msg("Starting Xpress load balancer")
 
 			ctx := context.Background()
+			newCtx := context.WithValue(ctx, "proxyProtocol", cfg.Router.ProxyProtocol)
 
-			routerHandler := router.NewRouterHandler(cfg.Router, ctx)
+			routerHandler := router.NewRouterHandler(cfg.Router, newCtx)
 
-			routerHandler.StartServer(fmt.Sprintf("0.0.0.0:%s", port), "", "")
+			parsedUrl, err := url.Parse(cfg.Server.ServerName)
+
+			if err != nil {
+				log.Err(err).Msg(err.Error())
+				os.Exit(1)
+			}
+
+			if len(cfg.Router.URLs) == 0 {
+				log.Err(fmt.Errorf("Backends unavailable!")).Msg("No backend urls have been configured")
+				os.Exit(1)
+			}
+
+			routerHandler.StartServer(parsedUrl.Host, cfg.Server.CertFile, cfg.Server.CertKey)
 
 		},
 	}
@@ -73,9 +88,12 @@ func loadConfig(path string) (*router.Config, error) {
 	}
 
 	var cfg router.Config
+
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, err
 	}
+
+	cfg.Normalize()
 
 	return &cfg, nil
 }

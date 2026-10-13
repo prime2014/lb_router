@@ -76,15 +76,24 @@ func (p *ConnectionPool) ProxyRequest(ctx context.Context, clientConn net.Conn) 
 		backendConn.SetDeadline(deadline)
 	}
 
-	// Build and send PROXY header (v2 is recommended)
-	header := proxyproto.HeaderProxyFromAddrs(
-		2,
-		clientConn.RemoteAddr(),
-		backendConn.LocalAddr(),
-	)
+	isValid, ok := ctx.Value("proxyProtocol").(bool)
 
-	if _, err := header.WriteTo(backendConn); err != nil {
-		return
+	if !ok {
+		isValid = false
+	}
+
+	// Build and send PROXY header (v2 is recommended)
+
+	if isValid {
+		header := proxyproto.HeaderProxyFromAddrs(
+			2,
+			clientConn.RemoteAddr(),
+			backendConn.LocalAddr(),
+		)
+
+		if _, err := header.WriteTo(backendConn); err != nil {
+			return
+		}
 	}
 
 	// track whether connection is healthy before returning to pool

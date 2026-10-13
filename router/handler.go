@@ -254,6 +254,7 @@ func (r *RouterHandler) StartTCPServer(url string) error {
 
 			// create a child context with a 10-second timeout derived from r.ctx
 			reqCtx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
+
 			defer cancel()
 
 			conn.ProxyRequest(reqCtx, myConn)
@@ -403,7 +404,7 @@ func (r *RouterHandler) serveHTTPProxy(w http.ResponseWriter, req *http.Request)
 				Str("RemoteAddr", targetServer).
 				Str("URL", req.URL.Path).
 				Msg("[Xpress]")
-			return
+
 		}
 
 		if req.GetBody != nil {

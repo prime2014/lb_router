@@ -5,19 +5,17 @@
 # the application will fail to read it.
 
 # if in a different location ensure you pass it in the cli
-#  xpress start -c 
+#  xpress start -c
 
 # The parameters in this file have been exhaustively added,
 # so it is recommended not to add anything more other than
 # what has already been detailed.
 
 server:
-  # The ip address of the host server of the load balancer
-  listener: "127.0.0.1"
   # The domain name that the host server uses for name resolution
   server_name: ""
-  # Port connection
-  port: "8080"
+  http_port: "80"      # default
+  https_port: "443"    # default
   # ssl certificate path location
   certFile: ""
   # ssl key file path location
@@ -25,12 +23,17 @@ server:
 
 router:
   # The protocol mode that the host server listens for
-  mode: "http" # mode -> http | https | tcp
+  mode: "http" # mode -> http | tcp
+  # whether to accept the proxy protocol v2. This only applies in the case tcp connections, and that is if it connects to backends which can
+  # resolve the protocol, unlike databases
+  proxy_protocol: false
   # The load balancing algorithm to use
   algorithm: "round_robin"
   # a list of urls for the downstream servers
   urls:
-    - "https://jsonplaceholder.typicode.com/"
+   - "http://127.0.0.1:8000"
+   - "http://127.0.0.1:8001"
+   - "http://127.0.0.1:8002"
 
 logs:
   # default path to the log files
