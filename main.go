@@ -56,11 +56,6 @@ var (
 				os.Exit(1)
 			}
 
-			if len(cfg.Router.URLs) == 0 {
-				log.Err(fmt.Errorf("Backends unavailable!")).Msg("No backend urls have been configured")
-				os.Exit(1)
-			}
-
 			routerHandler.StartServer(parsedUrl.Host, cfg.Server.CertFile, cfg.Server.CertKey)
 
 		},

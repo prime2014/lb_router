@@ -23,6 +23,8 @@ type RouterConfig struct {
 	Mode          string   `mapstructure:"mode"`
 	ProxyProtocol bool     `mapstructure:"proxy_protocol"`
 	Algorithm     string   `mapstructure:"algorithm"`
+	BlockedIps    []string `mapstructure:"blockedIps"`
+	MaxBodySize   int64    `mapstructure:"maxBodySize"`
 	URLs          []string `mapstructure:"urls"`
 }
 
@@ -38,6 +40,10 @@ func (c *Config) Normalize() {
 	}
 	if c.Router.Algorithm == "" {
 		c.Router.Algorithm = "round_robin"
+	}
+
+	if c.Router.MaxBodySize == 0 {
+		c.Router.MaxBodySize = 10 * 1024 * 1024
 	}
 
 }

@@ -30,12 +30,15 @@ router:
   # The load balancing algorithm to use
   algorithm: "round_robin"
   # a list of urls for the downstream servers
+  blockedIps: []
+  maxBodySize: 10    # this value is in MB
   urls:
    - "http://127.0.0.1:8000"
-   - "http://127.0.0.1:8001"
    - "http://127.0.0.1:8002"
+   - "http://127.0.0.1:8003"
 
 logs:
   # default path to the log files
   path: /var/logs/xpress/
   level: info
+

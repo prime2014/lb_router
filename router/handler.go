@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"sort"
 	"strconv"
 	"sync"
@@ -112,19 +111,39 @@ type RouterHandler struct {
 	ring        *ConsistentHashRing
 	connection  map[string]*atomic.Uint64
 	rateLimiter *RateLimiter
+	firewall    *FirewallConfig
 }
 
 func NewRouterHandler(cfg RouterConfig, ctx context.Context) *RouterHandler {
 	algorithm := ParseRoutingType(cfg.Algorithm)
 	mode := ParseConnectionType(cfg.Mode)
 
+	// 1. Pre-initialize the connection counters for each backend URL
+	connMap := make(map[string]*atomic.Uint64)
+	for _, u := range cfg.URLs {
+		connMap[u] = &atomic.Uint64{}
+	}
+
+	// 2. Build and populate the Firewall configuration safely
+	blockedMap := make(map[string]bool)
+	for _, ips := range cfg.BlockedIps {
+		blockedMap[ips] = true
+	}
+
+	firewallCfg := &FirewallConfig{
+		BlockedIps:  blockedMap,
+		MaxBodySize: cfg.MaxBodySize,
+	}
+
+	// 3. Construct the RouterHandler with all pointers safely allocated
 	handler := &RouterHandler{
 		urls:        cfg.URLs,
 		algorithm:   algorithm,
 		ctx:         ctx,
 		mode:        mode,
-		connection:  make(map[string]*atomic.Uint64),
+		connection:  connMap,
 		rateLimiter: NewRateLimiter(time.Minute, 1000),
+		firewall:    firewallCfg, // Assigned here so it's never nil!
 	}
 
 	// Initialize ring if consistent hashing is selected
@@ -312,6 +331,15 @@ func (r *RouterHandler) serveHTTPProxy(w http.ResponseWriter, req *http.Request)
 		clientIP = req.RemoteAddr
 	}
 
+	if req.Body != nil {
+		req.Body = http.MaxBytesReader(w, req.Body, r.firewall.MaxBodySize)
+	}
+
+	if r.firewall.ValidateblockedIps(clientIP) {
+		http.Error(w, "Forbidden: Ip blocked", http.StatusForbidden)
+		return
+	}
+
 	// check rate limiter using the persistent instance
 	if !r.rateLimiter.SlidingWindow(clientIP) {
 		http.Error(w, "Too many requests", http.StatusTooManyRequests)
@@ -330,94 +358,43 @@ func (r *RouterHandler) serveHTTPProxy(w http.ResponseWriter, req *http.Request)
 	}
 
 	reqCtx := context.WithValue(req.Context(), "client_ip", clientIP)
+	req = req.WithContext(reqCtx)
 
-	maxRetries := 3
-	if maxRetries > len(r.urls) {
-		maxRetries = len(r.urls)
-	}
-
-	var lastErr error
-	// var statusCode int
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		targetServer := r.SelectServer(reqCtx)
-		targetURL, parseError := url.Parse(targetServer)
-
-		if parseError != nil {
-			http.Error(w, "Bad Gateway Target", http.StatusBadGateway)
-			return
-		}
-
-		failed := false
-
-		proxy := &httputil.ReverseProxy{
-			Rewrite: func(pr *httputil.ProxyRequest) {
-				pr.SetXForwarded()
-				pr.SetURL(targetURL)
-
-				if pr.Out.Header.Get("User-Agent") == "" {
-					pr.Out.Header.Set("User-Agent", "Xpress-LoadBalancer/1.0")
-				}
-			},
-
-			ErrorHandler: func(rw http.ResponseWriter, r *http.Request, err error) {
-				lastErr = err
-				failed = true
-				log.Error().
-					Err(err).
-					Str("Target", targetServer).
-					Int("Attempt", attempt+1).
-					Msg("[Xpress] Connection error, retrying...")
-			},
-			ModifyResponse: func(resp *http.Response) error {
-				statusCode := resp.StatusCode
-
-				if statusCode >= 500 {
-					failed = true
-					lastErr = fmt.Errorf("backend returned status %d", statusCode)
-					log.Error().
-						Int("Status", statusCode).
-						Str("Target", targetServer).
-						Int("Attempt", attempt+1).
-						Msg("[Xpress] Server error, retrying...")
-				}
-				return nil
-			},
-		}
-
-		recorder := &proxyResponseRecorder{
-			ResponseWriter: w,
-			statusCode:     http.StatusOK,
-		}
-
-		proxy.ServeHTTP(recorder, req)
-
-		if !failed {
-			// Log successful or client-error response
-			event := log.Info()
-			if recorder.statusCode >= 400 {
-				event = log.Error()
+	proxy := &httputil.ReverseProxy{
+		Director: func(pr *http.Request) {
+			// Director is called before Transport; we set X-Forwarded headers here
+			if _, ok := pr.Header["X-Forwarded-For"]; !ok {
+				pr.Header.Set("X-Forwarded-For", clientIP)
 			}
+			if pr.Header.Get("User-Agent") == "" {
+				pr.Header.Set("User-Agent", "Xpress-LoadBalancer/1.0")
+			}
+		},
+		Transport: &RetryTransport{router: r},
+		ModifyResponse: func(resp *http.Response) error {
+			statusCode := resp.StatusCode
+			event := log.Info()
+			if statusCode >= 500 {
+				event = log.Error()
+			} else if statusCode >= 400 {
+				event = log.Warn()
+			}
+
 			event.
-				Int("Status", recorder.statusCode).
+				Int("Status", statusCode).
 				Str("Method", req.Method).
-				Str("RemoteAddr", targetServer).
+				Str("Protocol", req.Proto).
 				Str("URL", req.URL.Path).
 				Msg("[Xpress]")
 
-		}
-
-		if req.GetBody != nil {
-			body, err := req.GetBody()
-			if err == nil {
-				req.Body = body
-			}
-		}
+			return nil
+		},
+		ErrorHandler: func(rw http.ResponseWriter, r *http.Request, err error) {
+			log.Error().Err(err).Msg("[Xpress] Proxy exhausted all backend retries")
+			http.Error(w, "Bad Gateway - All backends failed", http.StatusBadGateway)
+		},
 	}
-
-	log.Error().Err(lastErr).Str("URL", req.URL.Path).Msg("[Xpress] All retry attempts failed")
-	http.Error(w, "Bad Gateway - All backends failed", http.StatusBadGateway)
-
+	proxy.ServeHTTP(w, req)
 }
 
 type proxyResponseRecorder struct {
@@ -427,8 +404,14 @@ type proxyResponseRecorder struct {
 }
 
 func (rec *proxyResponseRecorder) WriteHeader(code int) {
+	if rec.headerWritten {
+		return
+	}
 	rec.statusCode = code
 	rec.headerWritten = true
+
+	// CRITICAL FIX: Pass the status code down to the real client response writer!
+	rec.ResponseWriter.WriteHeader(code)
 }
 
 func (rec *proxyResponseRecorder) Write(b []byte) (int, error) {
