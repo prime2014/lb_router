@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 type RoutingType int
@@ -281,7 +283,12 @@ func (r *RouterHandler) StartTCPServer(url string) error {
 	}
 }
 
-func (r *RouterHandler) StartHTTPServer(listenAddr string, certFile, keyFile string) error {
+func (r *RouterHandler) StartHTTPServer(
+	listenAddr string,
+	certFile, keyFile string,
+	domains []string,
+	email string,
+) error {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", r.serveHTTPProxy)
@@ -308,19 +315,56 @@ func (r *RouterHandler) StartHTTPServer(listenAddr string, certFile, keyFile str
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
+	if len(domains) > 0 {
+		m := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			Email:      email,
+			HostPolicy: autocert.HostWhitelist(domains...),
+			Cache:      autocert.DirCache("/var/lib/xpress/certs"),
+		}
+
+		go func() {
+			httpSrv := &http.Server{
+				Addr:    ":80",
+				Handler: m.HTTPHandler(nil),
+			}
+
+			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Error().Err(err).Msg("[Xpress] ACME HTTP challenge server failed")
+			}
+		}()
+
+		server.TLSConfig = &tls.Config{
+			GetCertificate: m.GetCertificate,
+			MinVersion:     tls.VersionTLS12,
+		}
+		log.Info().
+			Strs("domains", domains).
+			Str("email", email).
+			Msg("[Xpress] Starting automatic HTTPS with Let's Encrypt")
+
+		// Empty strings → uses GetCertificate from the manager
+		if err := server.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
+			log.Error().Err(err).Msg("[Xpress] Server error")
+			return err
+		}
+		return nil
+	}
+
 	if certFile != "" && keyFile != "" {
 		log.Printf("[HTTPS Mode] TLS enabled using cert: %s", certFile)
 		if err := server.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
 			log.Printf("[Xpress] Server error: %v", err)
 			return err
 		}
-	} else {
-		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			log.Printf("[Xpress] Server error: %v", err)
-			return err
-		}
+		return nil
 	}
 
+	log.Info().Msg("[Xpress] Starting plain HTTP (no TLS)")
+	if err := server.ListenAndServe(); err != http.ErrServerClosed {
+		log.Error().Err(err).Msg("[Xpress] Server error")
+		return err
+	}
 	return nil
 }
 
@@ -425,7 +469,7 @@ func (r *RouterHandler) StartServer(listenAddr string, certFile, keyFile string)
 
 	switch r.mode {
 	case HttpMode:
-		return r.StartHTTPServer(listenAddr, certFile, keyFile)
+		return r.StartHTTPServer(listenAddr, certFile, keyFile, nil, "xpress@mail.com")
 	case TcpMode:
 		return r.StartTCPServer(listenAddr)
 	default:
